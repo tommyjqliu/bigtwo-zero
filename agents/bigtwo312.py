@@ -6,21 +6,17 @@ from utils.checkpoint import checkpoint
 import numpy as np
 
 
-class Bigtwo376(nn.Module):
+class Bigtwo312(nn.Module):
     def __init__(self, device):
         super().__init__()
         self.device = torch.device(device)
-        self.lstm = nn.LSTM(208, 64, batch_first=True)
-        self.dense1 = nn.Linear(64 + 52 + 52 + 52 * 3 + 52, 256)
+        self.dense1 = nn.Linear(52 + 52 + 52 * 3 + 52, 256)
         # lstm output + holding + others_holding + other played + legal_actions
         self.dense2 = nn.Linear(256, 128)
         self.dense3 = nn.Linear(128, 1)
         self.to(self.device)
 
-    def forward(self, x, z):
-        lstm_out, (h_n, _) = self.lstm(z)
-        lstm_out = lstm_out[:, -1, :]
-        x = torch.cat([lstm_out, x], dim=-1)
+    def forward(self, x):
         x = self.dense1(x)
         x = torch.relu(x)
         x = self.dense2(x)
@@ -29,7 +25,7 @@ class Bigtwo376(nn.Module):
         return x
 
 
-class Bigtwo376Numpy:
+class Bigtwo312Numpy:
     def __init__(self, state_dict):
         self.weights1 = np.array(state_dict["dense1.weight"]).T
         self.bias1 = np.array(state_dict["dense1.bias"]).T
@@ -54,37 +50,41 @@ class Bigtwo376Numpy:
         return np.argmax(x)
 
 
-class Agent376:
+class Agent312:
     def __init__(self, device):
         self.histories = []
         self.rewards = []
         self.device = torch.device(device)
-        self.model = Bigtwo376(device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+        self.model = Bigtwo312(device)
+        self.optimizer = torch.optim.RMSprop(
+            self.model.parameters(), lr=0.0001, alpha=0.99, momentum=0.0, eps=1e-5
+        )
 
     def act(self, game):
         if len(self.histories) < len(self.rewards) + 1:
             self.histories.append([])
         obs = self.observe(game)
-        with torch.no_grad():
-            output = self.model(obs["x_batch"], obs["z_batch"])
-        action_index = torch.argmax(output, dim=0)[0]
-        self.histories[-1].append(
-            dict(x=obs["x_batch"][action_index], z=obs["z_batch"][action_index])
-        )
-        action = game.players[game.player_to_act].legal_actions[action_index]
+        actions = game.players[game.player_to_act].legal_actions
+        if torch.rand(1) > 0.01:
+            with torch.no_grad():
+                output = self.model(obs["x_batch"])
+            action_index = torch.argmax(output, dim=0)[0]
+        else:
+            action_index = game.np_random.choice(len(actions))
+        self.histories[-1].append(obs["x_batch"][action_index])
+        action = actions[action_index]
         game.step(action)
 
     def learn(self):
         losses = []
         for i, history in enumerate(self.histories):
             self.optimizer.zero_grad()
-            x_batch = torch.stack([h["x"] for h in history])
-            z_batch = torch.stack([h["z"] for h in history])
-            output = self.model(x_batch, z_batch)
+            x_batch = torch.stack(history)
+            output = self.model(x_batch)
             y_batch = torch.ones(x_batch.shape[0], 1).to(self.device) * self.rewards[i]
             loss = torch.nn.functional.mse_loss(output, y_batch)
             loss.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(), 40.0)
             self.optimizer.step()
             losses.append(loss.detach())
         self.histories = []
@@ -116,22 +116,19 @@ class Agent376:
         x_batch = x.repeat(len(legal_actions), 1)
         x_batch = torch.cat([x_batch, legal_actions], dim=1).float()
 
-        last_16_actions = np.zeros((16, 52), dtype=bool)
-        for i, action in enumerate(history[::-1][:16]):
-            last_16_actions[i] = action
-        z = last_16_actions.reshape(-1, 208)
-        z_batch = (
-            torch.tensor(z)
-            .to(self.device)
-            .float()
-            .unsqueeze(0)
-            .repeat(len(legal_actions), 1, 1)
-        )
-
         return dict(
             x_batch=x_batch,
-            z_batch=z_batch,
         )
 
+    def get_reward(self, game: Bigtwo, index):
+        if game.winner == index:
+            lefts = np.sum([p.holding for p in game.players])
+            reward = lefts * 0.1
+            self.rewards.append(reward)
+        else:
+            lefts = np.sum(game.players[index].holding)
+            reward = -lefts * 0.1
+            self.rewards.append(reward)
+
     def save(self, id="default"):
-        checkpoint(self.model, self.optimizer, f"bigtwo376-{id}")
+        checkpoint(self.model, self.optimizer, f"bigtwo312-{id}")

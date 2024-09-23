@@ -20,3 +20,6 @@ class RandomAgent:
 
     def save(self, id):
         pass
+
+    def get_reward(self, game, index):
+        pass
