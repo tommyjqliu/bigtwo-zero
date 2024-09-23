@@ -6,16 +6,21 @@ from utils.checkpoint import checkpoint
 import numpy as np
 
 
-class Bigtwo156(nn.Module):
+class Bigtwo376(nn.Module):
     def __init__(self, device):
         super().__init__()
         self.device = torch.device(device)
-        self.dense1 = nn.Linear(52 + 52 + 52, 256)
+        self.lstm = nn.LSTM(208, 64, batch_first=True)
+        self.dense1 = nn.Linear(64 + 52 + 52 + 52 * 3 + 52, 256)
+        # lstm output + holding + others_holding + other played + legal_actions
         self.dense2 = nn.Linear(256, 128)
         self.dense3 = nn.Linear(128, 1)
         self.to(self.device)
 
-    def forward(self, x):
+    def forward(self, x, z):
+        lstm_out, (h_n, _) = self.lstm(z)
+        lstm_out = lstm_out[:, -1, :]
+        x = torch.cat([lstm_out, x], dim=-1)
         x = self.dense1(x)
         x = torch.relu(x)
         x = self.dense2(x)
@@ -24,7 +29,7 @@ class Bigtwo156(nn.Module):
         return x
 
 
-class Bigtwo156Numpy:
+class Bigtwo376Numpy:
     def __init__(self, state_dict):
         self.weights1 = np.array(state_dict["dense1.weight"]).T
         self.bias1 = np.array(state_dict["dense1.bias"]).T
@@ -49,12 +54,12 @@ class Bigtwo156Numpy:
         return np.argmax(x)
 
 
-class Agent156:
+class Agent376:
     def __init__(self, device):
         self.histories = []
         self.rewards = []
         self.device = torch.device(device)
-        self.model = Bigtwo156(device)
+        self.model = Bigtwo376(device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
 
     def act(self, game):
@@ -62,9 +67,11 @@ class Agent156:
             self.histories.append([])
         obs = self.observe(game)
         with torch.no_grad():
-            output = self.model(obs["x_batch"])
+            output = self.model(obs["x_batch"], obs["z_batch"])
         action_index = torch.argmax(output, dim=0)[0]
-        self.histories[-1].append(obs["x_batch"][action_index])
+        self.histories[-1].append(
+            dict(x=obs["x_batch"][action_index], z=obs["z_batch"][action_index])
+        )
         action = game.players[game.player_to_act].legal_actions[action_index]
         game.step(action)
 
@@ -72,8 +79,9 @@ class Agent156:
         losses = []
         for i, history in enumerate(self.histories):
             self.optimizer.zero_grad()
-            x_batch = torch.stack(history)
-            output = self.model(x_batch.float())
+            x_batch = torch.stack([h["x"] for h in history])
+            z_batch = torch.stack([h["z"] for h in history])
+            output = self.model(x_batch, z_batch)
             y_batch = torch.ones(x_batch.shape[0], 1).to(self.device) * self.rewards[i]
             loss = torch.nn.functional.mse_loss(output, y_batch)
             loss.backward()
@@ -84,6 +92,7 @@ class Agent156:
         return torch.mean(torch.tensor(losses)).cpu().item()
 
     def observe(self, game: Bigtwo):
+        empty = np.zeros(52, dtype=bool)
         players = game.players
         player_to_act = game.player_to_act
         player = players[player_to_act]
@@ -92,20 +101,37 @@ class Agent156:
             self.device
         )
         holding = torch.tensor(player.holding).to(self.device)
-        other_indices = [
-            (i + player_to_act) % 4
-            for i in range(4)
-            if (i + player_to_act) % 4 != player_to_act
-        ]
-        others_holding = [players[i].holding for i in other_indices]
-        others_holding = np.bitwise_or.reduce(others_holding, axis=0)
+        history = [t[1] for t in game.traces]
+        all_played = np.bitwise_or.reduce(history, axis=0) if history else empty
+        others_holding = np.bitwise_not(np.bitwise_or(player.holding, all_played))
         others_holding = torch.tensor(others_holding).to(self.device)
-        x = torch.cat([holding, others_holding], dim=0)
+        others_played = [history[::-1][i::4] for i in range(4)][:3]
+        others_played = [
+            np.bitwise_or.reduce(h, axis=0) if h else empty for h in others_played
+        ]
+        others_played = np.concatenate(others_played)
+        others_played = torch.tensor(others_played).to(self.device)
+
+        x = torch.cat([holding, others_holding, others_played], dim=0)
         x_batch = x.repeat(len(legal_actions), 1)
         x_batch = torch.cat([x_batch, legal_actions], dim=1).float()
+
+        last_16_actions = np.zeros((16, 52), dtype=bool)
+        for i, action in enumerate(history[::-1][:16]):
+            last_16_actions[i] = action
+        z = last_16_actions.reshape(-1, 208)
+        z_batch = (
+            torch.tensor(z)
+            .to(self.device)
+            .float()
+            .unsqueeze(0)
+            .repeat(len(legal_actions), 1, 1)
+        )
+
         return dict(
             x_batch=x_batch,
+            z_batch=z_batch,
         )
 
     def save(self, id="default"):
-        checkpoint(self.model, self.optimizer, f"bigtwo156-{id}")
+        checkpoint(self.model, self.optimizer, f"bigtwo376-{id}")
