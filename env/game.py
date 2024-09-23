@@ -6,8 +6,8 @@ from .utils import (
 
 
 class Bigtwo:
-    def __init__(self):
-        self.np_random = np.random.RandomState(42)
+    def __init__(self, seed = 42):
+        self.np_random = np.random.RandomState(seed)
         self.reset()
 
     def reset(self):
