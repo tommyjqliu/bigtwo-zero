@@ -7,7 +7,7 @@ from .utils import (
 
 class Bigtwo:
     def __init__(self):
-        self.np_random = np.random.RandomState()
+        self.np_random = np.random.RandomState(42)
         self.reset()
 
     def reset(self):
