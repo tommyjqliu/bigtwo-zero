@@ -6,32 +6,49 @@ from utils.checkpoint import checkpoint
 import numpy as np
 
 
-class Bigtwo312(nn.Module):
+class Bigtwo312c(nn.Module):
     def __init__(self, device):
         super().__init__()
         self.device = torch.device(device)
-        self.dense1 = nn.Linear(52 + 52 + 52 * 3 + 52, 192)
+        self.init_encoder()
+        self.dense1 = nn.Linear(24 * 6, 256)
         # holding + others_holding + other played + legal_actions
-        self.dense2 = nn.Linear(192, 128)
-        self.dense3 = nn.Linear(128, 128)
+        self.dense2 = nn.Linear(256, 256)
+        self.dense3 = nn.Linear(256, 128)
         self.dense4 = nn.Linear(128, 128)
         self.dense5 = nn.Linear(128, 1)
         self.to(self.device)
 
-    def forward(self, x):
-        x = self.dense1(x)
+    def init_encoder(self):
+        self.encode_dense1 = nn.Linear(52, 52)
+        self.encode_dense2 = nn.Linear(52, 24)
+
+    def encoder(self, x):
+        x = self.encode_dense1(x)
         x = torch.relu(x)
-        x = self.dense2(x)
+        x = self.encode_dense2(x)
         x = torch.relu(x)
-        x = self.dense3(x)
-        x = torch.relu(x)
-        x = self.dense4(x)
-        x = torch.relu(x)
-        x = self.dense5(x)
         return x
 
+    def forward(self, x, training=True):
+        x_shape = x.shape
+        x_flattened = x.view(-1, 52)
+        x_encoded = self.encoder(x_flattened)
+        x_encoded = x_encoded.view(*x_shape[:-1], 24 * 6)
 
-class Bigtwo312Numpy:
+        y = self.dense1(x_encoded)
+        y = torch.relu(y)
+        y = self.dense2(y)
+        y = torch.relu(y)
+        y = self.dense3(y)
+        y = torch.relu(y)
+        y = self.dense4(y)
+        y = torch.relu(y)
+        y = self.dense5(y)
+        return y
+
+
+class Bigtwo312cNumpy:
     def __init__(self, state_dict):
         self.weights1 = np.array(state_dict["dense1.weight"]).T
         self.bias1 = np.array(state_dict["dense1.bias"]).T
@@ -65,12 +82,12 @@ class Bigtwo312Numpy:
         return np.argmax(x)
 
 
-class Agent312:
+class Agent312c:
     def __init__(self, device):
         self.histories = []
         self.rewards = []
         self.device = torch.device(device)
-        self.model = Bigtwo312(device)
+        self.model = Bigtwo312c(device)
         self.optimizer = torch.optim.RMSprop(
             self.model.parameters(), lr=0.0001, alpha=0.99, momentum=0.0, eps=1e-5
         )
@@ -82,7 +99,7 @@ class Agent312:
         actions = game.players[game.player_to_act].legal_actions
         if not training or torch.rand(1) > 0.01:
             with torch.no_grad():
-                output = self.model(obs["x_batch"])
+                output = self.model(obs["x_batch"], training=False)
             action_index = torch.argmax(output, dim=0)[0]
         else:
             action_index = game.np_random.choice(len(actions))
@@ -99,7 +116,6 @@ class Agent312:
             y_batch = torch.ones(x_batch.shape[0], 1).to(self.device) * self.rewards[i]
             loss = torch.nn.functional.mse_loss(output, y_batch)
             loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(), 40.0)
             self.optimizer.step()
             losses.append(loss.detach())
         self.histories = []
@@ -136,14 +152,25 @@ class Agent312:
         )
 
     def get_reward(self, game: Bigtwo, index):
+        def punish(p):
+            if p < 10:
+                return p
+            elif p < 13:
+                return 2 * p
+            else:
+                return 3 * p
+
         if game.winner == index:
-            lefts = np.sum([p.holding for p in game.players])
+            lefts = [np.sum(p.holding) for p in game.players]
+            lefts = [punish(p) for p in lefts]
+            lefts = np.sum(lefts)
             reward = lefts * 0.1
             self.rewards.append(reward)
         else:
             lefts = np.sum(game.players[index].holding)
+            lefts = punish(lefts)
             reward = -lefts * 0.1
             self.rewards.append(reward)
 
     def save(self, id="default"):
-        checkpoint(self.model, self.optimizer, f"bigtwo312-{id}")
+        checkpoint(self.model, self.optimizer, f"bigtwo312c-{id}")

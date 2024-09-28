@@ -6,32 +6,68 @@ from utils.checkpoint import checkpoint
 import numpy as np
 
 
-class Bigtwo312(nn.Module):
+class Bigtwo520(nn.Module):
     def __init__(self, device):
         super().__init__()
         self.device = torch.device(device)
-        self.dense1 = nn.Linear(52 + 52 + 52 * 3 + 52, 192)
-        # holding + others_holding + other played + legal_actions
-        self.dense2 = nn.Linear(192, 128)
+        self.init_encoder()
+        self.lstm = nn.LSTM(16 * 4, 48, batch_first=True)
+        # shape: (batch, seq_len, input_size)
+        self.dense1 = nn.Linear(48 + 16 * 6, 128)
+        # lstm + holding + others_holding + other played + legal_actions
+        self.dense2 = nn.Linear(128, 128)
         self.dense3 = nn.Linear(128, 128)
         self.dense4 = nn.Linear(128, 128)
-        self.dense5 = nn.Linear(128, 1)
+        self.dense5 = nn.Linear(128, 128)
+        self.dense6 = nn.Linear(128, 128)
+        self.dense7 = nn.Linear(128, 1)
         self.to(self.device)
 
-    def forward(self, x):
-        x = self.dense1(x)
+    def init_encoder(self):
+        self.encode_dense1 = nn.Linear(52, 52)
+        self.encode_dense2 = nn.Linear(52, 52)
+        self.encode_dense3 = nn.Linear(52, 16)
+
+    def encoder(self, x):
+        x = self.encode_dense1(x)
         x = torch.relu(x)
-        x = self.dense2(x)
+        x = self.encode_dense2(x)
         x = torch.relu(x)
-        x = self.dense3(x)
-        x = torch.relu(x)
-        x = self.dense4(x)
-        x = torch.relu(x)
-        x = self.dense5(x)
+        x = self.encode_dense3(x)
         return x
 
+    def forward(self, x, z, training=True):
+        x_shape = x.shape
+        x_flattened = x.view(-1, 52)
+        x_encoded = self.encoder(x_flattened)
+        x_encoded = x_encoded.view(*x_shape[:-1], 16 * 6)
 
-class Bigtwo312Numpy:
+        z_shape = z.shape
+        z_flattened = z.view(-1, 52)
+        z_encoded = self.encoder(z_flattened)
+        z_encoded = z_encoded.view(*z_shape[:-1], 16 * 4)
+
+        lstm_out, (h_n, _) = self.lstm(z_encoded)
+        lstm_out = lstm_out[:, -1, :]
+
+        y = torch.cat([lstm_out, x_encoded], dim=-1)
+        y = self.dense1(y)
+        y = torch.relu(y)
+        y = self.dense2(y)
+        y = torch.relu(y)
+        y = self.dense3(y)
+        y = torch.relu(y)
+        y = self.dense4(y)
+        y = torch.relu(y)
+        y = self.dense5(y)
+        y = torch.relu(y)
+        y = self.dense6(y)
+        y = torch.relu(y)
+        y = self.dense7(y)
+        return y
+
+
+class Bigtwo520Numpy:
     def __init__(self, state_dict):
         self.weights1 = np.array(state_dict["dense1.weight"]).T
         self.bias1 = np.array(state_dict["dense1.bias"]).T
@@ -65,44 +101,50 @@ class Bigtwo312Numpy:
         return np.argmax(x)
 
 
-class Agent312:
+class Agent520:
     def __init__(self, device):
-        self.histories = []
+        self.x_histories = []
+        self.z_histories = []
         self.rewards = []
         self.device = torch.device(device)
-        self.model = Bigtwo312(device)
+        self.model = Bigtwo520(device)
         self.optimizer = torch.optim.RMSprop(
             self.model.parameters(), lr=0.0001, alpha=0.99, momentum=0.0, eps=1e-5
         )
 
     def act(self, game, training=True):
-        if len(self.histories) < len(self.rewards) + 1:
-            self.histories.append([])
+        if len(self.x_histories) < len(self.rewards) + 1:
+            self.x_histories.append([])
+            self.z_histories.append([])
+
         obs = self.observe(game)
         actions = game.players[game.player_to_act].legal_actions
         if not training or torch.rand(1) > 0.01:
             with torch.no_grad():
-                output = self.model(obs["x_batch"])
+                output = self.model(obs["x_batch"], obs["z_batch"], training=False)
             action_index = torch.argmax(output, dim=0)[0]
         else:
             action_index = game.np_random.choice(len(actions))
-        self.histories[-1].append(obs["x_batch"][action_index])
+        self.x_histories[-1].append(obs["x_batch"][action_index])
+        self.z_histories[-1].append(obs["z_batch"][action_index])
         action = actions[action_index]
         game.step(action)
 
     def learn(self):
         losses = []
-        for i, history in enumerate(self.histories):
+        for i, history in enumerate(self.x_histories):
             self.optimizer.zero_grad()
             x_batch = torch.stack(history)
-            output = self.model(x_batch)
+            z_batch = torch.stack(self.z_histories[i])
+            output = self.model(x_batch, z_batch)
             y_batch = torch.ones(x_batch.shape[0], 1).to(self.device) * self.rewards[i]
             loss = torch.nn.functional.mse_loss(output, y_batch)
             loss.backward()
             nn.utils.clip_grad_norm_(self.model.parameters(), 40.0)
             self.optimizer.step()
             losses.append(loss.detach())
-        self.histories = []
+        self.x_histories = []
+        self.z_histories = []
         self.rewards = []
         return torch.mean(torch.tensor(losses)).cpu().item()
 
@@ -131,8 +173,21 @@ class Agent312:
         x_batch = x.repeat(len(legal_actions), 1)
         x_batch = torch.cat([x_batch, legal_actions], dim=1).float()
 
+        last_16_actions = np.zeros((16, 52), dtype=bool)
+        for i, action in enumerate(history[::-1][:16]):
+            last_16_actions[i] = action
+        z = last_16_actions[::-1].reshape(-1, 208)
+        z_batch = (
+            torch.tensor(z)
+            .to(self.device)
+            .float()
+            .unsqueeze(0)
+            .repeat(len(legal_actions), 1, 1)
+        )
+
         return dict(
             x_batch=x_batch,
+            z_batch=z_batch,
         )
 
     def get_reward(self, game: Bigtwo, index):
@@ -146,4 +201,4 @@ class Agent312:
             self.rewards.append(reward)
 
     def save(self, id="default"):
-        checkpoint(self.model, self.optimizer, f"bigtwo312-{id}")
+        checkpoint(self.model, self.optimizer, f"bigtwo520-{id}")

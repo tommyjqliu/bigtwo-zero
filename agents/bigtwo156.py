@@ -57,7 +57,7 @@ class Agent156:
         self.model = Bigtwo156(device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
 
-    def act(self, game):
+    def act(self, game, training=True):
         if len(self.histories) < len(self.rewards) + 1:
             self.histories.append([])
         obs = self.observe(game)

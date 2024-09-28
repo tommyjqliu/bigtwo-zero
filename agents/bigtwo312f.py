@@ -6,32 +6,43 @@ from utils.checkpoint import checkpoint
 import numpy as np
 
 
-class Bigtwo312(nn.Module):
+class Bigtwo312f(nn.Module):
     def __init__(self, device):
         super().__init__()
         self.device = torch.device(device)
-        self.dense1 = nn.Linear(52 + 52 + 52 * 3 + 52, 192)
+        self.dense1 = nn.Linear(52 + 52 + 52 * 3 + 52, 256)
         # holding + others_holding + other played + legal_actions
-        self.dense2 = nn.Linear(192, 128)
+        self.dense2 = nn.Linear(256, 128)
         self.dense3 = nn.Linear(128, 128)
         self.dense4 = nn.Linear(128, 128)
         self.dense5 = nn.Linear(128, 1)
+        self.dropout = nn.Dropout(0.5)
         self.to(self.device)
 
-    def forward(self, x):
-        x = self.dense1(x)
-        x = torch.relu(x)
-        x = self.dense2(x)
-        x = torch.relu(x)
-        x = self.dense3(x)
-        x = torch.relu(x)
-        x = self.dense4(x)
-        x = torch.relu(x)
-        x = self.dense5(x)
-        return x
+    def forward(self, x, training=True):
+        y = self.dense1(x)
+        y = torch.relu(y)
+        if training:
+            y = self.dropout(y)
+        y = self.dense2(y)
+        y = torch.relu(y)
+        if training:
+            y = self.dropout(y)
+        residual = y
+        y = self.dense3(y)
+        y = torch.relu(y)
+        if training:
+            y = self.dropout(y)
+        y = self.dense4(y)
+        y = torch.relu(y)
+        if training:
+            y = self.dropout(y)
+        y = y + residual
+        y = self.dense5(y)
+        return y
 
 
-class Bigtwo312Numpy:
+class Bigtwo312fNumpy:
     def __init__(self, state_dict):
         self.weights1 = np.array(state_dict["dense1.weight"]).T
         self.bias1 = np.array(state_dict["dense1.bias"]).T
@@ -65,12 +76,12 @@ class Bigtwo312Numpy:
         return np.argmax(x)
 
 
-class Agent312:
+class Agent312f:
     def __init__(self, device):
         self.histories = []
         self.rewards = []
         self.device = torch.device(device)
-        self.model = Bigtwo312(device)
+        self.model = Bigtwo312f(device)
         self.optimizer = torch.optim.RMSprop(
             self.model.parameters(), lr=0.0001, alpha=0.99, momentum=0.0, eps=1e-5
         )
@@ -136,14 +147,25 @@ class Agent312:
         )
 
     def get_reward(self, game: Bigtwo, index):
+        def punish(p):
+            if p < 10:
+                return p
+            elif p < 13:
+                return 2 * p
+            else:
+                return 3 * p
+
         if game.winner == index:
-            lefts = np.sum([p.holding for p in game.players])
+            lefts = [np.sum(p.holding) for p in game.players]
+            lefts = [punish(p) for p in lefts]
+            lefts = np.sum(lefts)
             reward = lefts * 0.1
             self.rewards.append(reward)
         else:
             lefts = np.sum(game.players[index].holding)
+            lefts = punish(lefts)
             reward = -lefts * 0.1
             self.rewards.append(reward)
 
     def save(self, id="default"):
-        checkpoint(self.model, self.optimizer, f"bigtwo312-{id}")
+        checkpoint(self.model, self.optimizer, f"bigtwo312f-{id}")
